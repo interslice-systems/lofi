@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "interslice.lofi",
+  "name": "Lofi",
+  "version": "1.0.0",
+  "author": "Chris Biagini",
+  "license": "MIT",
+  "description": "Pick a Lofi Girl live stream and play it audio-only through mpv",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Lofi.qml"
+  },
+  "barWidget": {
+    "displayName": "Lofi",
+    "description": "Headphones icon; click for the stream list, middle-click to stop",
+    "category": "Media",
+    "allowMultiple": false
+  }
+}

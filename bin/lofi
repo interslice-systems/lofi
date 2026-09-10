@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# lofi — audio-only Lofi Girl player, wrapped for the interslice.lofi bar widget.
+#
+#   lofi list            JSON array of currently-live streams [{id,title}], cached 1h
+#   lofi play <id>       stop whatever is running, start mpv (audio only, detached)
+#                        with EVERY live stream as its playlist, starting at <id>,
+#                        so MPRIS Next/Previous (the keyboard's media keys, the
+#                        stock media widget's arrows) step between streams
+#   lofi stop            kill the running instance
+#   lofi toggle          stop if running, else start the last-played stream (or the first)
+#   lofi status          JSON {"running":bool,"id":"...","title":"..."}
+#
+# Play/pause and next/previous are NOT here on purpose: mpv-mpris puts mpv on
+# MPRIS, so the stock omarchy.media widget and the media keys handle those.
+set -euo pipefail
+
+CHANNEL="https://www.youtube.com/@LofiGirl/streams"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/lofi"
+RUN_DIR="${XDG_RUNTIME_DIR:-/tmp}/lofi"
+CACHE="$CACHE_DIR/streams.json"
+CACHE_TTL=3600
+mkdir -p "$CACHE_DIR" "$RUN_DIR"
+
+fresh_cache() {
+  [[ -s "$CACHE" ]] || return 1
+  local age=$(( $(date +%s) - $(stat -c %Y "$CACHE") ))
+  (( age < CACHE_TTL ))
+}
+
+cmd_list() {
+  if ! fresh_cache; then
+    # One JSON object per line from yt-dlp; keep only what is live right now.
+    if ! yt-dlp --flat-playlist -j "$CHANNEL" 2>/dev/null \
+      | python3 -c '
+import sys, json
+out = []
+for line in sys.stdin:
+    d = json.loads(line)
+    if d.get("live_status") == "is_live":
+        out.append({"id": d["id"], "title": d.get("title", d["id"])})
+json.dump(out, sys.stdout)
+' > "$CACHE.tmp" || [[ ! -s "$CACHE.tmp" ]]; then
+      rm -f "$CACHE.tmp"
+      # Offline or YouTube hiccup: serve the stale cache if there is one.
+      [[ -s "$CACHE" ]] || { echo '[]'; return 0; }
+    else
+      mv "$CACHE.tmp" "$CACHE"
+    fi
+  fi
+  cat "$CACHE"
+}
+
+running_pid() {
+  local pid
+  pid=$(cat "$RUN_DIR/pid" 2>/dev/null) || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  echo "$pid"
+}
+
+cmd_stop() {
+  local pid
+  if pid=$(running_pid); then
+    kill "$pid" 2>/dev/null || true
+  fi
+  rm -f "$RUN_DIR/pid" "$RUN_DIR/id"
+}
+
+cmd_play() {
+  local id="${1:?stream id required}"
+  cmd_stop
+  # Playlist of every live stream, in list order; mpv starts at the chosen one
+  # and resolves each entry through yt-dlp only when it is reached.
+  local start
+  start=$(cmd_list | python3 -c '
+import sys, json
+want = sys.argv[1]; out = sys.argv[2]
+streams = json.load(sys.stdin)
+with open(out, "w") as f:
+    f.write("#EXTM3U\n")
+    for s in streams:
+        f.write("#EXTINF:-1," + s["title"] + "\n")
+        f.write("https://www.youtube.com/watch?v=" + s["id"] + "\n")
+idx = next((i for i, s in enumerate(streams) if s["id"] == want), None)
+if idx is None:
+    # not in today\x27s list: play it alone
+    with open(out, "w") as f:
+        f.write("https://www.youtube.com/watch?v=" + want + "\n")
+    idx = 0
+print(idx)
+' "$id" "$RUN_DIR/playlist.m3u")
+  setsid -f mpv --no-video --no-terminal --really-quiet \
+    --ytdl-format=bestaudio \
+    --playlist="$RUN_DIR/playlist.m3u" --playlist-start="$start" --loop-playlist=inf \
+    >/dev/null 2>&1 &
+  # setsid -f forks twice; the mpv pid is the one that survives, found by its playlist.
+  local pid=""
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    pid=$(pgrep -f -n "^mpv .*playlist=$RUN_DIR/playlist.m3u" || true)
+    [[ -n "$pid" ]] && break
+    sleep 0.2
+  done
+  echo "$pid" > "$RUN_DIR/pid"
+  echo "$id" > "$RUN_DIR/id"
+  echo "$id" > "$CACHE_DIR/last"
+}
+
+# The stream mpv is on right now, from its MPRIS metadata (xesam:url); the
+# media keys move it without telling us. Falls back to the id we started.
+current_id() {
+  busctl --user --json=short get-property org.mpris.MediaPlayer2.mpv \
+    /org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player Metadata 2>/dev/null \
+    | python3 -c '
+import sys, json, re
+try:
+    d = json.load(sys.stdin)["data"]
+    url = d.get("xesam:url", {}).get("data", "")
+except Exception:
+    url = ""
+m = re.search(r"[?&]v=([A-Za-z0-9_-]{11})", url)
+print(m.group(1) if m else "")
+' || true
+}
+
+cmd_toggle() {
+  if running_pid >/dev/null; then
+    cmd_stop
+    return
+  fi
+  local id
+  id=$(cat "$CACHE_DIR/last" 2>/dev/null || true)
+  [[ -n "$id" ]] || id=$(cmd_list | python3 -c 'import sys, json; l = json.load(sys.stdin); print(l[0]["id"] if l else "")')
+  [[ -n "$id" ]] || return 1
+  cmd_play "$id"
+}
+
+cmd_status() {
+  local id="" title="" running=false
+  if running_pid >/dev/null; then
+    running=true
+    id=$(current_id)
+    [[ -n "$id" ]] || id=$(cat "$RUN_DIR/id" 2>/dev/null || true)
+    if [[ -n "$id" ]]; then
+      title=$(cmd_list | python3 -c '
+import sys, json
+want = sys.argv[1]
+print(next((s["title"] for s in json.load(sys.stdin) if s["id"] == want), ""))
+' "$id")
+    fi
+  fi
+  python3 -c 'import sys, json; print(json.dumps({"running": sys.argv[1] == "true", "id": sys.argv[2], "title": sys.argv[3]}))' \
+    "$running" "$id" "$title"
+}
+
+case "${1:-}" in
+  list)   cmd_list ;;
+  play)   cmd_play "${2:-}" ;;
+  stop)   cmd_stop ;;
+  toggle) cmd_toggle ;;
+  status) cmd_status ;;
+  *) sed -n '2,11p' "$0" >&2; exit 2 ;;
+esac
