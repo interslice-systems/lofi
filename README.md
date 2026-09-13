@@ -13,7 +13,9 @@ MPRIS, so Omarchy's stock `omarchy.media` widget and your keyboard's media
 keys already handle them. This widget only chooses and stops.
 
 Nothing cuts off hard. A small mpv script (`bin/fade.lua`) ramps the volume
-over about a second on pause, resume, stop, a switch, and every new stream —
+over about a second on pause, resume, stop, and every new stream (a switch
+fades out in 0.4 s, since silence follows anyway and it is on the way to the
+next stream) —
 including pause and resume from the media keys, since the script lives inside
 the player rather than in the wrapper. The one cut it cannot soften is the
 *end* of the old stream on MPRIS Next/Previous, because mpv drops the audio

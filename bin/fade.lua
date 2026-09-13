@@ -16,7 +16,9 @@
 local mp = require("mp")
 
 local STEP_S  = 0.04   -- 25 steps/s
-local FADE_S  = 0.9
+local FADE_S  = 0.9    -- pause, resume, stop, and every fade-in
+local SWITCH_S = 0.4   -- fade-out before a switch: silence follows anyway,
+                       -- and this is on the path to the next stream
 
 local target  = nil    -- the user's volume, restored after every fade
 local busy    = false  -- a ramp is running; observers stand down
@@ -33,9 +35,9 @@ local function set_pause(want)
   end
 end
 
-local function ramp(from, to, done)
+local function ramp(from, to, done, secs)
   busy = true
-  local steps = math.max(1, math.floor(FADE_S / STEP_S))
+  local steps = math.max(1, math.floor((secs or FADE_S) / STEP_S))
   local i = 0
   local timer
   timer = mp.add_periodic_timer(STEP_S, function()
@@ -99,5 +101,5 @@ mp.register_script_message("fade-play", function(playlist, index)
     return
   end
   target = vol()
-  ramp(target, 0, go)
+  ramp(target, 0, go, SWITCH_S)
 end)
