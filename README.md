@@ -12,6 +12,14 @@ next/previous are deliberately *not* here: `mpv-mpris` puts every mpv on
 MPRIS, so Omarchy's stock `omarchy.media` widget and your keyboard's media
 keys already handle them. This widget only chooses and stops.
 
+Nothing cuts off hard. A small mpv script (`bin/fade.lua`) ramps the volume
+over about a second on pause, resume, stop, a switch, and every new stream —
+including pause and resume from the media keys, since the script lives inside
+the player rather than in the wrapper. The one cut it cannot soften is the
+*end* of the old stream on MPRIS Next/Previous, because mpv drops the audio
+before any script hears about it; the new stream still fades in after the
+usual resolve gap.
+
 Built for one desk. Shared in case it's useful on yours. No warranty, no
 promises, no roadmap — but if it breaks in an interesting way, an issue is
 welcome.
@@ -39,6 +47,7 @@ All from the official Arch repos:
 | Package | Why |
 |---|---|
 | `mpv` | plays the stream |
+| `socat` | one-line JSON to mpv's IPC socket, so `lofi stop` can ask for a fade instead of killing |
 | `mpv-mpris` | puts mpv on MPRIS so the stock media widget and media keys work. Autoloads from `/etc/mpv/scripts/`; **do not** also add a `script=` line for it in `mpv.conf`, or the stream shows up as two players |
 | `yt-dlp` | resolves the YouTube live stream to an audio URL |
 | `python3` | JSON glue inside the script (already on every Omarchy install) |
@@ -71,9 +80,9 @@ o.bind("SUPER + CTRL + G", "Lofi Girl streams", "omarchy-shell shell toggle inte
 
 ```
 lofi list          JSON array of currently-live streams [{id,title}], cached 1 h
-lofi play <id>     stop whatever is running, start mpv with every live stream
-                   as its playlist, starting at <id>
-lofi stop          kill the running instance
+lofi play <id>     start mpv with every live stream as its playlist, starting
+                   at <id>; if one is already running, fade and switch in place
+lofi stop          fade out and quit the running instance
 lofi toggle        stop if running, else start the last-played stream
 lofi status        JSON {"running":bool,"id":"...","title":"..."}
 ```
