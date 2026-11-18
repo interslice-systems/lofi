@@ -76,6 +76,24 @@ move, `Space`/`Enter` play the cursor row (or stop it if it's playing),
 o.bind("SUPER + CTRL + G", "Lofi Girl streams", "omarchy-shell shell toggle interslice.lofi")
 ```
 
+## With a MacroPad
+
+On a desk that also runs
+[interslice-systems/macropad](https://github.com/interslice-systems/macropad)
+(an Adafruit MacroPad RP2040 as a preset radio for this player), the list
+grows a **MacroPad** section under the stations:
+
+- a **legend** for the pad's twelve blank keys, laid out three across like the
+  pad: which station each preset key holds, which one is playing, which are
+  off the air, and what the bottom row does;
+- a **Screen** picker for the pad's visualizer (`bars`, `skyline`,
+  `cassette`). Click one, walk to it with the arrow keys and press `Enter`, or
+  press `v` to step to the next.
+
+The section appears only when `macropad status` answers, so without the pad
+nothing changes. It is asked once when the list opens and then every two
+seconds while the list stays open; nothing runs while it is closed.
+
 ## The script
 
 `bin/lofi` is a plain bash script and works on its own:
@@ -110,6 +128,9 @@ python3 -m unittest discover -s test
 
 They run the script against a silent fake mpv (`test/fake_mpv.py`) with its
 state in a temp dir. No network, no sound, and the real player is untouched.
+`test/test_widget.py` checks `Lofi.qml` statically: every `Text` is plain
+text (titles come from YouTube, the legend from another program), and what
+the pad reports is bounded before it is drawn or passed back as an argument.
 
 ## Known behaviour
 

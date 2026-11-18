@@ -47,14 +47,68 @@ BarWidget {
   function close() { popupOpen = false }
   function toggle() { popupOpen ? close() : open() }
 
-  // Keyboard cursor. Starts on the playing stream (or the top), wraps.
+  // ---- MacroPad section ---------------------------------------------------
+  // Shown only on a desk that runs the macropad daemon
+  // (github.com/interslice-systems/macropad). Its `macropad status` says what
+  // each of the pad's twelve blank keys holds, which is what this section
+  // draws as a legend, plus a picker for the pad's screen.
+  //
+  // Asked once when the list opens, then every two seconds only while the list
+  // stays open AND the daemon answered. Without the pad that is one failed
+  // spawn per open, and nothing while the list is closed.
+  property var pad: null          // the last status, or null when nothing answers
+  property bool padSeen: false    // the ask in flight has been answered
+  readonly property var padViz: pad ? pad.visualizers : []
+  property string padText: ""     // its raw text, to skip rebuilding an unchanged legend
+  readonly property color padFg: bar ? bar.foreground : Color.foreground
+  readonly property color dimText: Qt.rgba(padFg.r, padFg.g, padFg.b, 0.55)
+
+  function checkPad() {
+    if (padProc.running) return
+    padSeen = false
+    padProc.running = true
+  }
+  function setViz(name) {
+    if (padAct.running || padViz.indexOf(name) < 0) return
+    padAct.command = ["macropad", "viz", name]
+    padAct.running = true
+  }
+  function nextViz() {
+    if (!pad || !padViz.length) return
+    setViz(padViz[(padViz.indexOf(pad.viz) + 1) % padViz.length])
+  }
+  // "lofi hip hop radio [emoji] beats to relax/study to" -> "lofi hip hop radio":
+  // every Lofi Girl title puts its name before the first emoji.
+  function shortTitle(t) {
+    var s = String(t || "").slice(0, 80)
+    var cut = s.replace(/[^\x20-\x7e].*$/, "").replace(/[\s\-]+$/, "")
+    return cut.length ? cut : s
+  }
+  function keyLabel(k) {
+    if (k.kind === "prev") return k.n + "  previous station"
+    if (k.kind === "next") return k.n + "  next station"
+    if (k.kind === "viz") return k.n + "  next screen"
+    if (!k.title) return k.n + "  empty"
+    var state = k.playing ? " \u00b7 playing" : (k.live ? "" : " \u00b7 off air")
+    return k.n + "  " + shortTitle(k.title) + state
+  }
+  function keyColor(c) {
+    return /^#[0-9a-fA-F]{6}$/.test(String(c)) ? c : padFg
+  }
+
+  // One cursor walks the stations and then the pad's screen choices. Starts on
+  // the playing stream (or the top), wraps.
   function moveCursor(dy) {
-    var n = streams.length
+    var n = streams.length + padViz.length
     if (!n) return
     if (cursorIndex < 0) { cursorIndex = dy > 0 ? 0 : n - 1; return }
     cursorIndex = (cursorIndex + dy + n) % n
   }
   function activateCursor() {
+    if (cursorIndex >= streams.length && cursorIndex < streams.length + padViz.length) {
+      setViz(padViz[cursorIndex - streams.length])    // stays open: watch it change
+      return
+    }
     if (cursorIndex < 0 || cursorIndex >= streams.length) return
     var s = streams[cursorIndex]
     act(playing && s.id === currentId ? ["stop"] : ["play", s.id])
@@ -103,6 +157,45 @@ BarWidget {
   Process {
     id: actionProc
     onExited: statusProc.running = true
+  }
+
+  Process {
+    id: padProc
+    command: ["macropad", "status"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        // Unchanged since the last ask: answered, and nothing to redraw.
+        if (root.pad !== null && text === root.padText) { root.padSeen = true; return }
+        let s
+        try { s = JSON.parse(text || "null") } catch (e) { return }
+        if (!s || s.ok !== true || !Array.isArray(s.keys) || !Array.isArray(s.visualizers)) return
+        // Bound what gets drawn or passed back as an argument.
+        s.keys = s.keys.slice(0, 12)
+        s.visualizers = s.visualizers.filter(function(n) {
+          return typeof n === "string" && /^[a-z]{1,16}$/.test(n)
+        }).slice(0, 8)
+        root.padText = text
+        root.pad = s
+        root.padSeen = true
+      }
+    }
+  }
+
+  Process {
+    id: padAct
+    onExited: root.checkPad()
+  }
+
+  Timer {
+    interval: 2000
+    repeat: true
+    running: root.popupOpen && root.pad !== null
+    onTriggered: {
+      if (padProc.running) return
+      if (root.padSeen) root.checkPad()
+      else root.pad = null          // the last ask got no answer: the daemon is gone
+    }
   }
 
   function act(args) {
@@ -200,7 +293,7 @@ BarWidget {
   // it here at the root, rows only read it, so exactly one row is lit.
   property int cursorIndex: -1
   onPopupOpenChanged: {
-    if (popupOpen) { if (!listProc.running) listProc.running = true; seedCursor() }
+    if (popupOpen) { if (!listProc.running) listProc.running = true; seedCursor(); checkPad() }
     else cursorIndex = -1
   }
 
@@ -223,6 +316,7 @@ BarWidget {
       onMoveRequested: function(dx, dy) { if (dy !== 0) root.moveCursor(dy) }
       onActivateRequested: root.activateCursor()
       onCloseRequested: root.close()
+      onTextKey: function(t, modifiers) { if (t === "v" && !modifiers) root.nextViz() }
 
     Column {
       id: column
@@ -316,6 +410,148 @@ BarWidget {
             onClicked: {
               root.act(row.sounding ? ["stop"] : ["play", row.modelData.id])
               root.popupOpen = false
+            }
+          }
+        }
+      }
+
+      // ---- MacroPad: what the blank keys hold, and the pad's screen --------
+      Item { visible: root.pad !== null; width: 1; height: Style.space(8) }
+      PanelSeparator { visible: root.pad !== null; foreground: root.bar.foreground }
+      Item { visible: root.pad !== null; width: 1; height: Style.space(6) }
+
+      Text {
+        visible: root.pad !== null
+        textFormat: Text.PlainText
+        text: root.pad && root.pad.link ? "MacroPad" : "MacroPad (not connected)"
+        color: root.bar.foreground
+        font.family: root.bar.fontFamily
+        font.pixelSize: Style.font.subtitle
+        font.bold: true
+        bottomPadding: Style.space(4)
+      }
+
+      // Laid out like the pad: three columns, four rows. Position is what
+      // identifies a key; the swatch only repeats the colour of its light.
+      Grid {
+        id: legend
+        visible: root.pad !== null
+        columns: 3
+        width: column.width
+        columnSpacing: Style.space(8)
+        rowSpacing: Style.space(2)
+
+        Repeater {
+          model: root.pad ? root.pad.keys : []
+
+          Item {
+            id: cell
+            required property var modelData
+            readonly property bool preset: modelData.kind === "preset"
+            readonly property bool held: preset && !!modelData.title
+            readonly property bool live: held && !!modelData.live
+            readonly property bool sounding: held && !!modelData.playing
+
+            width: (legend.width - legend.columnSpacing * 2) / 3
+            height: Style.space(30)
+
+            // Filled = the key holds a station; outline = empty or a plain
+            // control key; faded = held, but that station is off the air.
+            Rectangle {
+              id: swatch
+              width: Style.space(12)
+              height: width
+              radius: Style.space(3)
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              color: cell.held ? root.keyColor(cell.modelData.color) : "transparent"
+              opacity: cell.held && !cell.live ? 0.35 : 1
+              border.width: 1
+              border.color: root.dimText
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              anchors.left: swatch.right
+              anchors.leftMargin: Style.space(6)
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              text: root.keyLabel(cell.modelData)
+              color: cell.live || !cell.preset ? root.bar.foreground : root.dimText
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: cell.sounding
+              wrapMode: Text.WordWrap
+              maximumLineCount: 2
+              elide: Text.ElideRight
+            }
+          }
+        }
+      }
+
+      Text {
+        visible: root.pad !== null
+        textFormat: Text.PlainText
+        width: column.width
+        text: "Tap a key to play it, tap again to stop. Hold a key about a second to save the station that is on."
+        color: root.dimText
+        font.family: root.bar.fontFamily
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.WordWrap
+        topPadding: Style.space(4)
+        bottomPadding: Style.space(8)
+      }
+
+      Row {
+        visible: root.pad !== null
+        spacing: Style.space(6)
+
+        Text {
+          textFormat: Text.PlainText
+          anchors.verticalCenter: parent.verticalCenter
+          text: "Screen"
+          color: root.bar.foreground
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          rightPadding: Style.space(4)
+        }
+
+        Repeater {
+          model: root.padViz
+
+          CursorSurface {
+            id: chip
+            required property string modelData
+            required property int index
+            // Cursor slots continue after the stations (see moveCursor).
+            readonly property int slot: root.streams.length + index
+            readonly property bool chosen: root.pad !== null && root.pad.viz === modelData
+
+            width: chipLabel.implicitWidth + Style.space(20)
+            height: chipLabel.implicitHeight + Style.space(10)
+            foreground: root.bar.foreground
+            hasCursor: root.cursorIndex === slot
+            current: chosen
+            bordered: true
+
+            Text {
+              id: chipLabel
+              textFormat: Text.PlainText
+              anchors.centerIn: parent
+              text: chip.modelData
+              color: root.bar.foreground
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.bold: chip.chosen
+            }
+
+            MouseArea {
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onEntered: root.cursorIndex = chip.slot
+              onExited: if (root.cursorIndex === chip.slot) root.cursorIndex = -1
+              onClicked: root.setViz(chip.modelData)
             }
           }
         }
