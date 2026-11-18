@@ -63,7 +63,7 @@ not run on Omarchy 3 or on a bare Quickshell.
 | Action | Result |
 |---|---|
 | Left click | list of live streams; click one to play, click the highlighted one to stop |
-| Right click | stop, or resume the last-played stream |
+| Right click | stop if playing, resume if paused, otherwise start the last-played stream |
 | Middle click | stop |
 | Media keys / `omarchy.media` arrows | next / previous stream — every live stream is loaded as mpv's playlist, so MPRIS Next and Previous step between them |
 
@@ -85,14 +85,31 @@ lofi list          JSON array of currently-live streams [{id,title}], cached 1 h
 lofi play <id>     start mpv with every live stream as its playlist, starting
                    at <id>; if one is already running, fade and switch in place
 lofi stop          fade out and quit the running instance
-lofi toggle        stop if running, else start the last-played stream
-lofi status        JSON {"running":bool,"id":"...","title":"..."}
+lofi toggle        stop if playing, resume if paused, else start the
+                   last-played stream
+lofi status        JSON {"running":bool,"playing":bool,"id":"...","title":"..."}
 ```
 
+`running` means the player exists; `playing` means it is also not paused. A
+media key, a headphone disconnect, or anything else that pauses mpv leaves it
+running but not playing, and the widget takes her headphones off for it. The
+station and the pause state are read from mpv's own IPC socket, so they follow
+the media keys. `play`, `stop` and `toggle` take a lock, so two quick presses
+cannot act on each other's half-finished state.
+
 State lives in `$XDG_CACHE_HOME/lofi/` (stream list, last-played id) and
-`$XDG_RUNTIME_DIR/lofi/` (pid, playlist). The stream list is discovered from
+`$XDG_RUNTIME_DIR/lofi/` (pid, playlist, lock). The stream list is discovered from
 the channel's `/streams` tab, so new or retired streams need no code change;
 if YouTube is unreachable the stale cache is served.
+
+### Tests
+
+```sh
+python3 -m unittest discover -s test
+```
+
+They run the script against a silent fake mpv (`test/fake_mpv.py`) with its
+state in a temp dir. No network, no sound, and the real player is untouched.
 
 ## Known behaviour
 

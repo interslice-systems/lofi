@@ -7,11 +7,12 @@ import qs.Ui
 
 // Lofi Girl stream chooser. Wraps the `lofi` script that ships beside it (bin/lofi):
 //   lofi list    -> [{id,title}]  live streams, cached 1h
-//   lofi status  -> {running,id,title}
+//   lofi status  -> {running,playing,id,title}   running = player exists,
+//                                                 playing = and is not paused
 //   lofi play ID / lofi stop
 // Play/pause is deliberately not here: mpv speaks MPRIS, so the stock
 // omarchy.media widget owns that. This widget only chooses and stops.
-// Left click: stream list. Right click: stop, or start the last stream.
+// Left click: stream list. Right click: stop, resume if paused, or start the last stream.
 // Middle click: stop. While stopped she takes the headphones off.
 // SUPER+CTRL+G (bindings.lua -> `omarchy-shell shell toggle interslice.lofi`) opens
 // the same list keyboard-first: arrows or j/k move, Space/Enter play or stop
@@ -31,6 +32,9 @@ BarWidget {
 
   property var streams: []
   property bool running: false
+  // running = the player exists; playing = it is not paused. A paused player
+  // (media key, headphones off) still exists, and she takes her headphones off.
+  property bool playing: false
   property string currentId: ""
   property string currentTitle: ""
   property bool popupOpen: false
@@ -53,7 +57,7 @@ BarWidget {
   function activateCursor() {
     if (cursorIndex < 0 || cursorIndex >= streams.length) return
     var s = streams[cursorIndex]
-    act(running && s.id === currentId ? ["stop"] : ["play", s.id])
+    act(playing && s.id === currentId ? ["stop"] : ["play", s.id])
     popupOpen = false
   }
   function seedCursor() {
@@ -75,6 +79,7 @@ BarWidget {
         let s
         try { s = JSON.parse(text || "{}") } catch (e) { return }
         root.running = !!s.running
+        root.playing = !!s.playing
         root.currentId = s.id || ""
         root.currentTitle = s.title || ""
       }
@@ -107,7 +112,7 @@ BarWidget {
   }
 
   Timer {
-    interval: 10000
+    interval: 3000
     running: true
     repeat: true
     triggeredOnStart: true
@@ -122,7 +127,9 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     slotSize: Style.bar.statusSlot
-    tooltipText: root.running ? root.currentTitle : "Lofi Girl: click for streams, right-click to resume"
+    tooltipText: root.playing ? root.currentTitle
+      : root.running ? root.currentTitle + " (paused): right-click to resume"
+      : "Lofi Girl: click for streams, right-click to resume"
     onPressed: function(mouseButton) {
       if (mouseButton === Qt.MiddleButton) root.act(["stop"])
       else if (mouseButton === Qt.RightButton) root.act(["toggle"])
@@ -163,8 +170,8 @@ BarWidget {
           // headphones, painted only while a stream runs. Without them the hair
           // dome underneath is already whole: the "gap" was only these
           // background-colored strokes carving it.
-          readonly property color phones: root.running ? root.fg : "transparent"
-          readonly property color phoneRim: root.running ? root.ground : "transparent"
+          readonly property color phones: root.playing ? root.fg : "transparent"
+          readonly property color phoneRim: root.playing ? root.ground : "transparent"
 
           // headband: an arc concentric with the head, background-colored gap under a foreground stroke
           ShapePath {
@@ -241,6 +248,9 @@ BarWidget {
           required property int index
           readonly property bool selected: root.running && modelData.id === root.currentId
           readonly property bool hovered: root.cursorIndex === index
+          // The current station while it is audible. A paused current station
+          // is still `selected`, but a click on it plays rather than stops.
+          readonly property bool sounding: selected && root.playing
 
           width: column.width
           height: label.implicitHeight + Style.space(10)
@@ -257,14 +267,16 @@ BarWidget {
             spacing: Style.space(8)
 
             // playing row: play glyph; hovered playing row: stop glyph (click stops);
-            // hovered other row: dim play glyph (click plays); otherwise blank.
+            // paused current row: pause glyph; any other hovered row: play glyph
+            // (click plays); otherwise blank.
             Text {
               id: glyph
               textFormat: Text.PlainText
               width: Style.space(14)
               horizontalAlignment: Text.AlignHCenter
               anchors.verticalCenter: parent.verticalCenter
-              text: row.selected ? (row.hovered ? "\uf04d" : "\uf04b") : (row.hovered ? "\uf04b" : "")
+              text: row.sounding ? (row.hovered ? "\uf04d" : "\uf04b")
+                    : row.hovered ? "\uf04b" : (row.selected ? "\uf04c" : "")
               color: row.selected ? root.bar.foreground : Qt.darker(root.bar.foreground, 1.6)
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.caption
@@ -286,7 +298,7 @@ BarWidget {
             Text {
               id: hint
               textFormat: Text.PlainText
-              text: row.hovered ? (row.selected ? "stop" : "play") : ""
+              text: row.hovered ? (row.sounding ? "stop" : "play") : ""
               width: implicitWidth
               color: Qt.darker(root.bar.foreground, 1.6)
               font.family: root.bar.fontFamily
@@ -302,7 +314,7 @@ BarWidget {
             onEntered: root.cursorIndex = row.index
             onExited: if (root.cursorIndex === row.index) root.cursorIndex = -1
             onClicked: {
-              root.act(row.selected ? ["stop"] : ["play", row.modelData.id])
+              root.act(row.sounding ? ["stop"] : ["play", row.modelData.id])
               root.popupOpen = false
             }
           }

@@ -7,15 +7,21 @@
 #                        so MPRIS Next/Previous (the keyboard's media keys, the
 #                        stock media widget's arrows) step between streams
 #   lofi stop            fade out and quit the running instance
-#   lofi toggle          stop if running, else start the last-played stream (or the first)
-#   lofi status          JSON {"running":bool,"id":"...","title":"..."}
+#   lofi toggle          stop if playing, resume if paused, else start the
+#                        last-played stream (or the first)
+#   lofi status          JSON {"running":bool,"playing":bool,"id":"...","title":"..."}
+#                        running = the player exists; playing = it is not paused.
+#                        A paused player (media key, headphones off) is running
+#                        but not playing.
 #
 # Play/pause and next/previous are NOT here on purpose: mpv-mpris puts mpv on
 # MPRIS, so the stock omarchy.media widget and the media keys handle those.
 # Every cut is softened by bin/fade.lua, loaded into mpv: pause/resume, a new
 # stream, stop, and a switch all ramp the volume over about a second. The
 # script talks to the running mpv over its JSON IPC socket (via socat); if the
-# socket does not answer it falls back to a plain kill.
+# socket does not answer it falls back to a plain kill. What is playing is read
+# from that same socket, never inferred from the process merely existing.
+# play, stop and toggle hold a lock, so two of them cannot interleave.
 set -euo pipefail
 
 CHANNEL="https://www.youtube.com/@LofiGirl/streams"
@@ -31,6 +37,55 @@ mkdir -p "$CACHE_DIR" "$RUN_DIR"
 ipc() {
   [[ -S "$IPC" ]] || return 1
   printf '%s\n' "$1" | timeout 2 socat -t 0.5 - "UNIX-CONNECT:$IPC" >/dev/null 2>&1
+}
+
+# What the running mpv is doing, from its own socket: prints "<state> <id>",
+# state one of playing|paused|idle; the id is empty when nothing is loaded.
+# Fails if the socket does not answer. MPRIS is not used for this: mpv-mpris
+# registers a per-instance bus name (org.mpris.MediaPlayer2.mpv.instance-...),
+# so a lookup by the bare name never finds the player.
+mpv_state() {
+  [[ -S "$IPC" ]] || return 1
+  python3 - "$IPC" <<'PY'
+import json, re, socket, sys
+want = {1: "pause", 2: "path", 3: "idle-active"}
+got = {}
+try:
+    s = socket.socket(socket.AF_UNIX)
+    s.settimeout(1.0)
+    s.connect(sys.argv[1])
+    for rid, prop in want.items():
+        s.sendall((json.dumps({"command": ["get_property", prop], "request_id": rid}) + "\n").encode())
+    buf = b""
+    while len(got) < len(want):
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+        *lines, buf = buf.split(b"\n")
+        for line in lines:
+            try:
+                m = json.loads(line)
+            except ValueError:
+                continue
+            if m.get("request_id") in want:      # events carry no request_id
+                got[m["request_id"]] = m.get("data")
+except OSError:
+    pass
+if 1 not in got:
+    sys.exit(1)
+state = "idle" if got.get(3) else ("paused" if got.get(1) else "playing")
+m = re.search(r"[?&]v=([A-Za-z0-9_-]{11})", got.get(2) or "")
+print(state, m.group(1) if m else "")
+PY
+}
+
+# play, stop and toggle each read state and then change it, and a stop takes
+# seconds (the fade). Without this, a second command started mid-fade acts on
+# what the first is about to undo. Held on fd 9 until the script exits.
+lock() {
+  exec 9>"$RUN_DIR/lock"
+  flock -w 30 9
 }
 
 fresh_cache() {
@@ -118,7 +173,7 @@ print(idx)
     --ytdl-format=bestaudio \
     --input-ipc-server="$IPC" --script="$HERE/fade.lua" \
     --playlist="$RUN_DIR/playlist.m3u" --playlist-start="$start" --loop-playlist=inf \
-    >/dev/null 2>&1 &
+    >/dev/null 2>&1 9>&- &
   # setsid -f forks twice; the mpv pid is the one that survives, found by its playlist.
   local pid=""
   for _ in 1 2 3 4 5 6 7 8 9 10; do
@@ -131,29 +186,19 @@ print(idx)
   echo "$id" > "$CACHE_DIR/last"
 }
 
-# The stream mpv is on right now, from its MPRIS metadata (xesam:url); the
-# media keys move it without telling us. Falls back to the id we started.
-current_id() {
-  busctl --user --json=short get-property org.mpris.MediaPlayer2.mpv \
-    /org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player Metadata 2>/dev/null \
-    | python3 -c '
-import sys, json, re
-try:
-    d = json.load(sys.stdin)["data"]
-    url = d.get("xesam:url", {}).get("data", "")
-except Exception:
-    url = ""
-m = re.search(r"[?&]v=([A-Za-z0-9_-]{11})", url)
-print(m.group(1) if m else "")
-' || true
-}
-
 cmd_toggle() {
+  local state="" id=""
   if running_pid >/dev/null; then
-    cmd_stop
-    return
+    read -r state id < <(mpv_state) || true
+    case "$state" in
+      paused)
+        # Silent but alive: the push means "play". fade.lua ramps it back in.
+        ipc '{"command":["set_property","pause",false]}' && return
+        ;;
+      idle) ;;      # alive with nothing loaded: fall through and load a stream
+      *) cmd_stop; return ;;
+    esac
   fi
-  local id
   id=$(cat "$CACHE_DIR/last" 2>/dev/null || true)
   [[ -n "$id" ]] || id=$(cmd_list | python3 -c 'import sys, json; l = json.load(sys.stdin); print(l[0]["id"] if l else "")')
   [[ -n "$id" ]] || return 1
@@ -161,10 +206,16 @@ cmd_toggle() {
 }
 
 cmd_status() {
-  local id="" title="" running=false
+  local id="" title="" running=false playing=false state="" now=""
   if running_pid >/dev/null; then
     running=true
-    id=$(current_id)
+    # If the socket does not answer we cannot tell paused from playing; say
+    # playing, which is what "running" has always been taken to mean.
+    playing=true
+    if read -r state now < <(mpv_state); then
+      [[ "$state" == playing ]] || playing=false
+      id="$now"       # where mpv is now: the media keys move it without telling us
+    fi
     [[ -n "$id" ]] || id=$(cat "$RUN_DIR/id" 2>/dev/null || true)
     if [[ -n "$id" ]]; then
       title=$(cmd_list | python3 -c '
@@ -174,15 +225,15 @@ print(next((s["title"] for s in json.load(sys.stdin) if s["id"] == want), ""))
 ' "$id")
     fi
   fi
-  python3 -c 'import sys, json; print(json.dumps({"running": sys.argv[1] == "true", "id": sys.argv[2], "title": sys.argv[3]}))' \
-    "$running" "$id" "$title"
+  python3 -c 'import sys, json; print(json.dumps({"running": sys.argv[1] == "true", "playing": sys.argv[2] == "true", "id": sys.argv[3], "title": sys.argv[4]}))' \
+    "$running" "$playing" "$id" "$title"
 }
 
 case "${1:-}" in
   list)   cmd_list ;;
-  play)   cmd_play "${2:-}" ;;
-  stop)   cmd_stop ;;
-  toggle) cmd_toggle ;;
+  play)   lock; cmd_play "${2:-}" ;;
+  stop)   lock; cmd_stop ;;
+  toggle) lock; cmd_toggle ;;
   status) cmd_status ;;
-  *) sed -n '2,11p' "$0" >&2; exit 2 ;;
+  *) sed -n '2,15p' "$0" >&2; exit 2 ;;
 esac
